@@ -75,7 +75,7 @@ for x1, y1, x2, y2, text, fill, outline in top_boxes:
     draw_box(d, (x1, y1, x2, y2), text, fill, outline, f_note)
 for sx in (335, 900, 1465):
     arrow(d, (sx, top_y + 130), (900, 390), color=(61, 120, 216), width=4)
-draw_box(d, (170, 390, 1630, 620), 'GuardContext 状态机与调度中心\n计划暂停 / 在线 / 有线认证 / Wi-Fi 回退 / 退避等待 / 凭据错误 / 人工处理', '#DCEBFF', '#245CB8', font(34, True), radius=30)
+draw_box(d, (170, 390, 1630, 620), 'GuardContext 状态机与调度中心\n计划暂停 / 在线 / 有线认证 / Wi-Fi 回退 / 30 秒重试 / 凭据错误 / 人工处理', '#DCEBFF', '#245CB8', font(34, True), radius=30)
 bottom = [
     (70, 790, 400, 1000, 'NetworkInspector\n识别真实有线与无线网卡\n过滤 VPN 和虚拟适配器', '#F3F7FD', '#7C93B3'),
     (430, 790, 760, 1000, 'WifiManager\n检查配置、连接 gdei-WiFi-S\n等待获取 IP', '#F3F7FD', '#7C93B3'),
@@ -106,10 +106,10 @@ draw_box(d, (90, 1290, 500, 1410), '有线门户认证入口', '#EDF0FF', '#6378
 # right path
 draw_box(d, (1380, 310, 1810, 430), '保持暂停\n06:00 或用户恢复后重新检查', amber, amber_line, boxf)
 draw_box(d, (1380, 500, 1810, 620), '有线物理断开持续 10 秒？', red, red_line, boxf)
-draw_box(d, (1380, 690, 1810, 810), 'Wi-Fi 回退\n仅连接已保存的 gdei-WiFi-S', blue, blue_line, boxf)
+draw_box(d, (1380, 690, 1810, 810), 'Wi-Fi 回退\n软件开关可尝试自动开启', blue, blue_line, boxf)
 draw_box(d, (1380, 890, 1810, 1010), '取得 IP 后检查互联网\n必要时认证 Wi-Fi 门户', blue, blue_line, boxf)
-draw_box(d, (1380, 1090, 1810, 1210), '达到失败上限或需要人工处理\n安全停止自动提交', red, red_line, boxf)
-draw_box(d, (1380, 1290, 1810, 1410), '按 1、5、15、30 分钟退避重试\n每小时最多 6 次', amber, amber_line, boxf)
+draw_box(d, (1380, 1090, 1810, 1210), '凭据错误或需要人工处理\n安全停止自动提交', red, red_line, boxf)
+draw_box(d, (1380, 1290, 1810, 1410), '普通失败固定等待 30 秒\n持续重试，无每小时上限', amber, amber_line, boxf)
 # arrows left
 for y1, y2 in [(250, 310), (430, 500), (620, 690), (810, 890), (1010, 1090), (1210, 1290)]:
     arrow(d, (295, y1), (295, y2), blue_line, 4)
@@ -158,7 +158,7 @@ draw_box(d, (1450, 150, 1830, 280), '可见验证码 / 二次认证字段', red,
 draw_box(d, (1450, 350, 1830, 480), '立即停止自动提交\n提示用户处理', red, red_line, font(23, True))
 draw_box(d, (1450, 620, 1830, 750), 'errorNumber 63032\n或凭据错误信息', red, red_line, font(23, True))
 draw_box(d, (1450, 820, 1830, 950), '锁定自动认证\n直到用户修改账号密码', red, red_line, font(23, True))
-draw_box(d, (1450, 1080, 1830, 1210), '其他普通失败\n按退避策略重试', amber, amber_line, font(23, True))
+draw_box(d, (1450, 1080, 1830, 1210), '其他普通失败\n30 秒后继续重试', amber, amber_line, font(23, True))
 arrow(d, (640, 220), (1450, 220), red_line, 4, '检测到', smallf)
 arrow(d, (1640, 280), (1640, 350), red_line, 4)
 arrow(d, (640, 780), (1450, 685), red_line, 4, '明确错误', smallf)

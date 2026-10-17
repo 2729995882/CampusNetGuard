@@ -31,6 +31,11 @@ namespace CampusNetGuard
 
     public static class ScheduleRules
     {
+        public static string GetPauseDescription()
+        {
+            return "学校计划断网时段（01:00-06:00），仅暂停自动重连，不会断开网络。";
+        }
+
         public static bool IsPaused(DateTime now)
         {
             bool scheduledDay = now.DayOfWeek == DayOfWeek.Sunday ||
@@ -45,11 +50,45 @@ namespace CampusNetGuard
         }
     }
 
+    public sealed class RetryDecision
+    {
+        public DateTime NextAttemptUtc;
+        public int DelaySeconds;
+        public int FailureCount;
+    }
+
+    public static class RetryPolicy
+    {
+        public const int NormalRetryDelaySeconds = 30;
+        public const int BrowserFallbackThrottleSeconds = 120;
+
+        public static RetryDecision PlanFailure(DateTime nowUtc, int currentFailureCount)
+        {
+            return new RetryDecision
+            {
+                NextAttemptUtc = nowUtc.AddSeconds(NormalRetryDelaySeconds),
+                DelaySeconds = NormalRetryDelaySeconds,
+                FailureCount = currentFailureCount + 1
+            };
+        }
+    }
+
+    public static class GuardStateTransitions
+    {
+        public static bool IsRecovery(GuardState previous, GuardState next)
+        {
+            return next == GuardState.Online &&
+                previous != GuardState.Online &&
+                previous != GuardState.Starting;
+        }
+    }
+
     public sealed class AppSettings
     {
         public bool AutoReconnectEnabled = true;
         public bool StartWithWindows = true;
         public bool NotificationsEnabled = true;
+        public bool AutoEnableWifi = true;
         public string Username = "";
         public string ProtectedPassword = "";
         public int ReturnPolicy = (int)EthernetReturnPolicy.AutoAfter60Seconds;
@@ -226,6 +265,7 @@ namespace CampusNetGuard
                 settings.AutoReconnectEnabled = ReadBool(root, "AutoReconnectEnabled", settings.AutoReconnectEnabled);
                 settings.StartWithWindows = ReadBool(root, "StartWithWindows", settings.StartWithWindows);
                 settings.NotificationsEnabled = ReadBool(root, "NotificationsEnabled", settings.NotificationsEnabled);
+                settings.AutoEnableWifi = ReadBool(root, "AutoEnableWifi", settings.AutoEnableWifi);
                 settings.Username = ReadText(root, "Username", settings.Username);
                 settings.ProtectedPassword = ReadText(root, "ProtectedPassword", settings.ProtectedPassword);
                 settings.ReturnPolicy = ReadInt(root, "ReturnPolicy", settings.ReturnPolicy);
@@ -253,6 +293,7 @@ namespace CampusNetGuard
                     Add(root, document, "AutoReconnectEnabled", settings.AutoReconnectEnabled.ToString());
                     Add(root, document, "StartWithWindows", settings.StartWithWindows.ToString());
                     Add(root, document, "NotificationsEnabled", settings.NotificationsEnabled.ToString());
+                    Add(root, document, "AutoEnableWifi", settings.AutoEnableWifi.ToString());
                     Add(root, document, "Username", settings.Username ?? "");
                     Add(root, document, "ProtectedPassword", settings.ProtectedPassword ?? "");
                     Add(root, document, "ReturnPolicy", settings.ReturnPolicy.ToString(CultureInfo.InvariantCulture));

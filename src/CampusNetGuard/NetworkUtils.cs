@@ -6,6 +6,7 @@ using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using Microsoft.Win32;
@@ -318,8 +319,39 @@ namespace CampusNetGuard
         }
     }
 
+    public enum WifiRadioAvailability
+    {
+        Unknown,
+        On,
+        SoftwareOff,
+        HardwareOff
+    }
+
+    public static class WifiRadioPolicy
+    {
+        public static bool ShouldAttemptEnable(bool autoEnableWifi, WifiRadioAvailability state)
+        {
+            return autoEnableWifi && state == WifiRadioAvailability.SoftwareOff;
+        }
+
+        public static string DescribeUnavailable(WifiRadioAvailability state)
+        {
+            if (state == WifiRadioAvailability.HardwareOff)
+                return "无线硬件开关已关闭，Windows 无法通过软件接口强制开启，请用笔记本开关或 Fn 快捷键开启 Wi-Fi。";
+            if (state == WifiRadioAvailability.SoftwareOff)
+                return "Windows Wi-Fi 软件开关处于关闭状态。";
+            return "当前无法读取 Wi-Fi 无线电状态。";
+        }
+    }
+
     public static class WifiManager
     {
+        private const int WlanClientVersion = 2;
+        private const int WlanIntfOpcodeRadioState = 4;
+        private const int Dot11RadioStateOn = 1;
+        private const int Dot11RadioStateOff = 2;
+        private const int WlanMaxPhyIndex = 64;
+
         public static bool IsAdapterPresent()
         {
             return NetworkInspector.FindWifi() != null;
@@ -338,6 +370,147 @@ namespace CampusNetGuard
         {
             CommandResult result = CommandRunner.Run("netsh", "wlan show networks mode=bssid", 12000);
             return !result.TimedOut && result.ExitCode == 0 && result.Output.IndexOf(profile, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static WifiRadioAvailability GetRadioAvailability(NetworkSnapshot wifi, out string message)
+        {
+            message = "";
+            if (wifi == null || wifi.Interface == null)
+            {
+                message = "未找到无线网卡。";
+                return WifiRadioAvailability.Unknown;
+            }
+
+            IntPtr client = IntPtr.Zero;
+            try
+            {
+                uint negotiatedVersion;
+                uint openResult = WlanOpenHandle(WlanClientVersion, IntPtr.Zero,
+                    out negotiatedVersion, out client);
+                if (openResult != 0)
+                {
+                    message = FormatWlanError("WlanOpenHandle", openResult);
+                    return WifiRadioAvailability.Unknown;
+                }
+
+                Guid interfaceGuid;
+                string interfaceDescription;
+                uint interfaceResult = TryFindWlanInterface(client, wifi.Interface.Id,
+                    out interfaceGuid, out interfaceDescription);
+                if (interfaceResult != 0)
+                {
+                    message = FormatWlanError("WlanEnumInterfaces", interfaceResult);
+                    return WifiRadioAvailability.Unknown;
+                }
+
+                WLAN_RADIO_STATE radioState;
+                uint queryResult = QueryRadioState(client, ref interfaceGuid, out radioState);
+                if (queryResult != 0)
+                {
+                    message = FormatWlanError("WlanQueryInterface", queryResult);
+                    return WifiRadioAvailability.Unknown;
+                }
+                return ClassifyRadioState(radioState);
+            }
+            finally
+            {
+                if (client != IntPtr.Zero)
+                    WlanCloseHandle(client, IntPtr.Zero);
+            }
+        }
+
+        public static bool TryEnableSoftwareRadio(NetworkSnapshot wifi, out string message)
+        {
+            message = "";
+            if (wifi == null || wifi.Interface == null)
+            {
+                message = "未找到无线网卡。";
+                return false;
+            }
+
+            IntPtr client = IntPtr.Zero;
+            try
+            {
+                uint negotiatedVersion;
+                uint openResult = WlanOpenHandle(WlanClientVersion, IntPtr.Zero,
+                    out negotiatedVersion, out client);
+                if (openResult != 0)
+                {
+                    message = FormatWlanError("WlanOpenHandle", openResult);
+                    return false;
+                }
+
+                Guid interfaceGuid;
+                string interfaceDescription;
+                uint interfaceResult = TryFindWlanInterface(client, wifi.Interface.Id,
+                    out interfaceGuid, out interfaceDescription);
+                if (interfaceResult != 0)
+                {
+                    message = FormatWlanError("WlanEnumInterfaces", interfaceResult);
+                    return false;
+                }
+
+                WLAN_RADIO_STATE radioState;
+                uint queryResult = QueryRadioState(client, ref interfaceGuid, out radioState);
+                if (queryResult != 0)
+                {
+                    message = FormatWlanError("WlanQueryInterface", queryResult);
+                    return false;
+                }
+
+                WifiRadioAvailability availability = ClassifyRadioState(radioState);
+                if (availability == WifiRadioAvailability.On)
+                {
+                    message = "Wi-Fi 已处于开启状态。";
+                    return true;
+                }
+                if (availability == WifiRadioAvailability.HardwareOff)
+                {
+                    message = WifiRadioPolicy.DescribeUnavailable(availability);
+                    return false;
+                }
+
+                for (int i = 0; i < radioState.dwNumberOfPhys; i++)
+                {
+                    WLAN_PHY_RADIO_STATE phy = radioState.PhyRadioState[i];
+                    if (phy.dot11HardwareRadioState != Dot11RadioStateOn ||
+                        phy.dot11SoftwareRadioState == Dot11RadioStateOn)
+                    {
+                        continue;
+                    }
+
+                    phy.dot11SoftwareRadioState = Dot11RadioStateOn;
+                    uint setResult = WlanSetInterface(client, ref interfaceGuid,
+                        WlanIntfOpcodeRadioState, (uint)Marshal.SizeOf(typeof(WLAN_PHY_RADIO_STATE)),
+                        ref phy, IntPtr.Zero);
+                    if (setResult != 0)
+                    {
+                        message = FormatWlanError("WlanSetInterface", setResult);
+                        return false;
+                    }
+                }
+
+                queryResult = QueryRadioState(client, ref interfaceGuid, out radioState);
+                if (queryResult != 0)
+                {
+                    message = FormatWlanError("WlanQueryInterface", queryResult);
+                    return false;
+                }
+                availability = ClassifyRadioState(radioState);
+                if (availability == WifiRadioAvailability.On)
+                {
+                    message = "已通过 Windows WLAN 接口开启 Wi-Fi。";
+                    return true;
+                }
+
+                message = WifiRadioPolicy.DescribeUnavailable(availability);
+                return false;
+            }
+            finally
+            {
+                if (client != IntPtr.Zero)
+                    WlanCloseHandle(client, IntPtr.Zero);
+            }
         }
 
         public static string GetConnectedSsid()
@@ -414,6 +587,153 @@ namespace CampusNetGuard
         {
             return (value ?? "").Replace("\"", "\\\"");
         }
+
+        private static WifiRadioAvailability ClassifyRadioState(WLAN_RADIO_STATE state)
+        {
+            bool hasHardwareOn = false;
+            bool hasSoftwareOff = false;
+            for (int i = 0; i < state.dwNumberOfPhys; i++)
+            {
+                WLAN_PHY_RADIO_STATE phy = state.PhyRadioState[i];
+                if (phy.dot11HardwareRadioState == Dot11RadioStateOff)
+                    return WifiRadioAvailability.HardwareOff;
+                if (phy.dot11HardwareRadioState == Dot11RadioStateOn)
+                    hasHardwareOn = true;
+                if (phy.dot11SoftwareRadioState == Dot11RadioStateOff)
+                    hasSoftwareOff = true;
+            }
+            if (hasSoftwareOff)
+                return WifiRadioAvailability.SoftwareOff;
+            return hasHardwareOn ? WifiRadioAvailability.On : WifiRadioAvailability.Unknown;
+        }
+
+        private static uint TryFindWlanInterface(IntPtr client, string interfaceId,
+            out Guid interfaceGuid, out string interfaceDescription)
+        {
+            interfaceGuid = Guid.Empty;
+            interfaceDescription = "";
+            IntPtr listPointer;
+            uint result = WlanEnumInterfaces(client, IntPtr.Zero, out listPointer);
+            if (result != 0)
+                return result;
+
+            try
+            {
+                int count = Marshal.ReadInt32(listPointer);
+                int infoSize = Marshal.SizeOf(typeof(WLAN_INTERFACE_INFO));
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr infoPointer = IntPtr.Add(listPointer, 8 + i * infoSize);
+                    WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(
+                        infoPointer, typeof(WLAN_INTERFACE_INFO));
+                    if (string.IsNullOrEmpty(interfaceId) ||
+                        string.Equals(info.InterfaceGuid.ToString("B"), interfaceId,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        interfaceGuid = info.InterfaceGuid;
+                        interfaceDescription = info.strInterfaceDescription ?? "";
+                        return 0;
+                    }
+                }
+                return 1168; // ERROR_NOT_FOUND
+            }
+            finally
+            {
+                WlanFreeMemory(listPointer);
+            }
+        }
+
+        private static uint QueryRadioState(IntPtr client, ref Guid interfaceGuid,
+            out WLAN_RADIO_STATE radioState)
+        {
+            radioState = new WLAN_RADIO_STATE
+            {
+                PhyRadioState = new WLAN_PHY_RADIO_STATE[WlanMaxPhyIndex]
+            };
+            IntPtr data;
+            uint dataSize;
+            uint opcodeValueType;
+            uint result = WlanQueryInterface(client, ref interfaceGuid, WlanIntfOpcodeRadioState,
+                IntPtr.Zero, out dataSize, out data, out opcodeValueType);
+            if (result != 0)
+                return result;
+            try
+            {
+                radioState = (WLAN_RADIO_STATE)Marshal.PtrToStructure(
+                    data, typeof(WLAN_RADIO_STATE));
+                return 0;
+            }
+            finally
+            {
+                WlanFreeMemory(data);
+            }
+        }
+
+        private static string FormatWlanError(string operation, uint code)
+        {
+            string detail;
+            try
+            {
+                detail = new System.ComponentModel.Win32Exception((int)code).Message;
+            }
+            catch
+            {
+                detail = "未知错误";
+            }
+            return operation + " 失败（" + code + "）：" + detail;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WLAN_INTERFACE_INFO
+        {
+            public Guid InterfaceGuid;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string strInterfaceDescription;
+
+            public int isState;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_PHY_RADIO_STATE
+        {
+            public int dwPhyIndex;
+            public int dot11SoftwareRadioState;
+            public int dot11HardwareRadioState;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_RADIO_STATE
+        {
+            public int dwNumberOfPhys;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = WlanMaxPhyIndex)]
+            public WLAN_PHY_RADIO_STATE[] PhyRadioState;
+        }
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanOpenHandle(int clientVersion, IntPtr reserved,
+            out uint negotiatedVersion, out IntPtr clientHandle);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanCloseHandle(IntPtr clientHandle, IntPtr reserved);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanEnumInterfaces(IntPtr clientHandle, IntPtr reserved,
+            out IntPtr interfaceList);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanQueryInterface(IntPtr clientHandle,
+            ref Guid interfaceGuid, int opcode, IntPtr reserved, out uint dataSize,
+            out IntPtr data, out uint opcodeValueType);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanSetInterface(IntPtr clientHandle,
+            ref Guid interfaceGuid, int opcode, uint dataSize,
+            ref WLAN_PHY_RADIO_STATE data, IntPtr reserved);
+
+        [DllImport("wlanapi.dll")]
+        private static extern void WlanFreeMemory(IntPtr memory);
     }
 
     public static class StartupManager

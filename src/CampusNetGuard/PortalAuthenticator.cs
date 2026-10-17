@@ -22,6 +22,7 @@ namespace CampusNetGuard
         public string Message = "";
         public string ErrorCode = "";
         public string PortalLink = "";
+        public bool BrowserFallbackAttempted;
 
         public static AuthResult Success()
         {
@@ -85,6 +86,12 @@ namespace CampusNetGuard
         public static AuthResult Authenticate(string[] candidates, IPAddress bindAddress,
             string username, string password)
         {
+            return Authenticate(candidates, bindAddress, username, password, true);
+        }
+
+        public static AuthResult Authenticate(string[] candidates, IPAddress bindAddress,
+            string username, string password, bool allowBrowserFallback)
+        {
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
                 return AuthResult.Failure(AuthOutcome.RejectedCredentials, "尚未配置校园网账号或密码。", "CONFIG");
 
@@ -96,7 +103,8 @@ namespace CampusNetGuard
                     string candidate = candidates[i];
                     if (string.IsNullOrEmpty(candidate))
                         continue;
-                    AuthResult result = AuthenticateCandidate(candidate, bindAddress, username, password);
+                    AuthResult result = AuthenticateCandidate(candidate, bindAddress, username, password,
+                        allowBrowserFallback);
                     if (result.Outcome != AuthOutcome.FormParseFailure)
                         return result;
                     lastError = result.Message;
@@ -109,18 +117,18 @@ namespace CampusNetGuard
         }
 
         private static AuthResult AuthenticateCandidate(string entryUrl, IPAddress bindAddress,
-            string username, string password)
+            string username, string password, bool allowBrowserFallback)
         {
             CookieContainer cookies = new CookieContainer();
             HttpResult page = HttpHelper.Get(entryUrl, bindAddress, cookies, true);
             if (page == null || string.IsNullOrEmpty(page.Content) ||
                 page.Content.IndexOf("<input", StringComparison.OrdinalIgnoreCase) < 0)
-                return AuthenticateWithBrowser(entryUrl, username, password,
+                return BrowserFallbackOrFailure(entryUrl, username, password, allowBrowserFallback,
                     "门户页面为空或未返回登录表单。");
 
             List<FormField> fields = HtmlFormParser.Parse(page.Content);
             if (fields.Count == 0)
-                return AuthenticateWithBrowser(entryUrl, username, password,
+                return BrowserFallbackOrFailure(entryUrl, username, password, allowBrowserFallback,
                     "门户登录表单中没有可提交字段。");
 
             if (HasManualChallenge(page.Content, fields))
@@ -144,24 +152,34 @@ namespace CampusNetGuard
             string formBody = BuildFormBody(fields);
             HttpResult response = HttpHelper.PostForm(postUrl, formBody, page.FinalUrl, bindAddress, cookies);
             if (response == null || string.IsNullOrEmpty(response.Content))
-                return AuthenticateWithBrowser(entryUrl, username, password,
+                return BrowserFallbackOrFailure(entryUrl, username, password, allowBrowserFallback,
                     "门户登录请求没有返回内容。");
 
             return ParseAuthResponse(response.Content);
+        }
+
+        private static AuthResult BrowserFallbackOrFailure(string entryUrl, string username,
+            string password, bool allowBrowserFallback, string directFailure)
+        {
+            if (!allowBrowserFallback)
+                return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                    "直连门户失败（" + directFailure + "），浏览器回退仍在冷却中。",
+                    "PORTAL_BROWSER_THROTTLED");
+            return AuthenticateWithBrowser(entryUrl, username, password, directFailure);
         }
 
         private static AuthResult AuthenticateWithBrowser(string entryUrl, string username,
             string password, string directFailure)
         {
             if (!PortalBrowserSession.IsBrowserAvailable())
-                return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                return BrowserResult(AuthOutcome.FormParseFailure,
                     "直连门户失败（" + directFailure + "），且未找到 Google Chrome 或 Microsoft Edge。",
                     "PORTAL_BROWSER_MISSING");
 
             string startError;
             PortalBrowserSession session = PortalBrowserSession.Start(out startError);
             if (session == null)
-                return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                return BrowserResult(AuthOutcome.FormParseFailure,
                     "直连门户失败（" + directFailure + "），浏览器回退启动失败：" +
                     (string.IsNullOrEmpty(startError) ? "未知原因。" : startError),
                     "PORTAL_BROWSER_START");
@@ -172,18 +190,18 @@ namespace CampusNetGuard
                 string finalUrl;
                 string loadError;
                 if (!session.LoadPage(entryUrl, out content, out finalUrl, out loadError))
-                    return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                    return BrowserResult(AuthOutcome.FormParseFailure,
                         "浏览器回退无法打开门户：" +
                         (string.IsNullOrEmpty(loadError) ? "页面加载失败。" : loadError),
                         "PORTAL_BROWSER_LOAD");
 
                 List<FormField> fields = HtmlFormParser.Parse(content);
                 if (fields.Count == 0)
-                    return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                    return BrowserResult(AuthOutcome.FormParseFailure,
                         "浏览器已打开门户，但没有找到登录表单。", "PORTAL_BROWSER_FORM");
 
                 if (HasManualChallenge(content, fields))
-                    return AuthResult.Failure(AuthOutcome.ManualActionRequired,
+                    return BrowserResult(AuthOutcome.ManualActionRequired,
                         "门户要求验证码或二次认证，自动认证已停止，请手动完成验证。", "PORTAL_MANUAL");
 
                 SetField(fields, IsUserNameField, username);
@@ -197,13 +215,22 @@ namespace CampusNetGuard
                 string submitError;
                 if (!session.SubmitLogin(username, password, BuildFormBody(fields),
                     out responseContent, out submitError))
-                    return AuthResult.Failure(AuthOutcome.TransientFailure,
+                    return BrowserResult(AuthOutcome.TransientFailure,
                         "浏览器回退认证失败：" +
                         (string.IsNullOrEmpty(submitError) ? "门户请求失败。" : submitError),
                         "PORTAL_BROWSER_SUBMIT");
 
-                return ParseAuthResponse(responseContent);
+                AuthResult result = ParseAuthResponse(responseContent);
+                result.BrowserFallbackAttempted = true;
+                return result;
             }
+        }
+
+        private static AuthResult BrowserResult(AuthOutcome outcome, string message, string code)
+        {
+            AuthResult result = AuthResult.Failure(outcome, message, code);
+            result.BrowserFallbackAttempted = true;
+            return result;
         }
 
         private static AuthResult ParseAuthResponse(string responseContent)

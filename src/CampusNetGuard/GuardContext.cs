@@ -30,6 +30,7 @@ namespace CampusNetGuard
         private readonly ToolStripMenuItem recoveryKeepItem;
         private readonly ToolStripMenuItem settingsItem;
         private readonly ToolStripMenuItem logsItem;
+        private readonly ToolStripMenuItem wifiRadioItem;
         private readonly ToolStripMenuItem startupItem;
         private readonly ToolStripMenuItem exitItem;
         private readonly System.Windows.Forms.Timer timer;
@@ -37,7 +38,6 @@ namespace CampusNetGuard
         private readonly System.Threading.Timer pauseTimer;
         private readonly SynchronizationContext synchronizationContext;
         private readonly Control dispatcher;
-        private readonly List<DateTime> attemptHistory = new List<DateTime>();
         private readonly object stateLock = new object();
 
         private StatusForm statusForm;
@@ -59,8 +59,11 @@ namespace CampusNetGuard
         private bool ethernetWasUp;
         private bool notifiedWifiMissing;
         private bool notifiedWifiConnectFailure;
+        private bool notifiedWifiRadioUnavailable;
+        private bool wifiRadioEnableAttempted;
         private int failureCount;
         private DateTime? nextAttemptUtc;
+        private DateTime? nextBrowserFallbackUtc;
         private DateTime? ethernetDownSince;
         private DateTime? ethernetStableSince;
         private DateTime? lastCheckUtc;
@@ -125,6 +128,8 @@ namespace CampusNetGuard
             logsItem.Click += delegate { OpenLogsFolder(); };
             ToolStripMenuItem logLocationItem = new ToolStripMenuItem("日志保存位置...");
             logLocationItem.Click += delegate { ShowLogLocationDialog(); };
+            wifiRadioItem = new ToolStripMenuItem("有线断开时尝试开启 Wi-Fi");
+            wifiRadioItem.Click += delegate { ToggleAutoEnableWifi(); };
             startupItem = new ToolStripMenuItem("开机启动");
             startupItem.Click += delegate { ToggleStartup(); };
             exitItem = new ToolStripMenuItem("退出");
@@ -139,6 +144,7 @@ namespace CampusNetGuard
             menu.Items.Add(settingsItem);
             menu.Items.Add(logsItem);
             menu.Items.Add(logLocationItem);
+            menu.Items.Add(wifiRadioItem);
             menu.Items.Add(startupItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
@@ -190,6 +196,11 @@ namespace CampusNetGuard
         public bool HasSavedPassword
         {
             get { return !string.IsNullOrEmpty(settings.ProtectedPassword); }
+        }
+
+        public bool AutoEnableWifi
+        {
+            get { return settings.AutoEnableWifi; }
         }
 
         public bool CanRestoreWired
@@ -245,6 +256,19 @@ namespace CampusNetGuard
             settings.ReturnPolicy = (int)policy;
             store.Save(settings);
             statusDetail = "有线恢复策略已更新";
+            UpdateTray();
+            QueueCheck();
+        }
+
+        public void ToggleAutoEnableWifi()
+        {
+            settings.AutoEnableWifi = !settings.AutoEnableWifi;
+            store.Save(settings);
+            wifiRadioEnableAttempted = false;
+            notifiedWifiRadioUnavailable = false;
+            statusDetail = settings.AutoEnableWifi
+                ? "已允许在有线断开时尝试开启 Wi-Fi。"
+                : "已禁止自动开启 Wi-Fi。";
             UpdateTray();
             QueueCheck();
         }
@@ -484,7 +508,10 @@ namespace CampusNetGuard
             builder.AppendLine("无线网络: " + Describe(wifi) + (string.IsNullOrEmpty(currentSsid) ? "" : "，SSID=" + currentSsid));
             builder.AppendLine("互联网: " + (lastProbeOnline ? "在线" : "未确认或不在线"));
             builder.AppendLine("校园环境: " + (IsRecentCampusContext() ? "已识别（最近确认）" : "未知或非校园网络"));
-            builder.AppendLine("计划暂停: " + (IsScheduledPause(DateTime.Now) ? "是（01:00–06:00）" : "否"));
+            builder.AppendLine("计划暂停: " + (IsScheduledPause(DateTime.Now)
+                ? "是（学校计划断网时段，仅暂停自动重连）"
+                : "否"));
+            builder.AppendLine("自动开启 Wi-Fi: " + (settings.AutoEnableWifi ? "允许" : "禁止"));
             builder.AppendLine("日志目录: " + AppPaths.LogDirectory);
             builder.AppendLine("最近认证: " + lastAuthMessage);
             builder.AppendLine("下次重试: " + (nextAttemptUtc.HasValue
@@ -618,7 +645,7 @@ namespace CampusNetGuard
             {
                 CancelEthernetFallbackCheck();
                 SchedulePauseResumeCheck();
-                SetState(GuardState.ScheduledPaused, "计划断网时段（01:00–06:00），已暂停网络检测与自动重连。");
+                SetState(GuardState.ScheduledPaused, ScheduleRules.GetPauseDescription());
                 return;
             }
             CancelPauseResumeCheck();
@@ -712,15 +739,13 @@ namespace CampusNetGuard
                     return;
                 }
 
-                RecordAttempt();
                 SetState(GuardState.Authenticating, "正在重新认证有线校园网...");
                 string[] candidates = new string[]
                 {
                     "https://nac.gdei.edu.cn/portal/2021/login.jsp?nasip=192.168.104.2",
                     "http://nac.gdei.edu.cn/portal/2021/login.jsp?nasip=192.168.104.2"
                 };
-                AuthResult result = PortalAuthenticator.Authenticate(candidates, ethernet.IPv4,
-                    settings.Username, password);
+                AuthResult result = AuthenticatePortal(candidates, ethernet.IPv4);
                 HandleAuthResult(result, ethernet.IPv4, false);
                 return;
             }
@@ -797,12 +822,6 @@ namespace CampusNetGuard
                 return;
             }
 
-            bool campusEvidence = IsRecentCampusContext() || WifiManager.IsSsidVisible(profile);
-            if (!campusEvidence)
-            {
-                SetState(GuardState.EnvironmentUnknown, "未检测到校园网特征，且未发现 " + profile + "，已暂停 Wi-Fi 回退。");
-                return;
-            }
             if (wifi == null)
             {
                 if (!notifiedWifiMissing)
@@ -811,6 +830,55 @@ namespace CampusNetGuard
                     Notify("未检测到无线网卡", "请检查 Windows 无线网卡是否已启用。", ToolTipIcon.Warning);
                 }
                 SetState(GuardState.EnvironmentUnknown, "未检测到无线网卡，无法执行 Wi-Fi 回退。");
+                return;
+            }
+
+            string radioMessage;
+            WifiRadioAvailability radioState = WifiManager.GetRadioAvailability(wifi, out radioMessage);
+            if (radioState == WifiRadioAvailability.SoftwareOff ||
+                radioState == WifiRadioAvailability.HardwareOff)
+            {
+                if (WifiRadioPolicy.ShouldAttemptEnable(settings.AutoEnableWifi, radioState) &&
+                    !wifiRadioEnableAttempted)
+                {
+                    wifiRadioEnableAttempted = true;
+                    if (WifiManager.TryEnableSoftwareRadio(wifi, out radioMessage))
+                    {
+                        Logger.Info(radioMessage);
+                        radioState = WifiManager.GetRadioAvailability(wifi, out radioMessage);
+                    }
+                    else
+                    {
+                        Logger.Warn(radioMessage);
+                    }
+                }
+
+                if (radioState != WifiRadioAvailability.On)
+                {
+                    string unavailable = string.IsNullOrEmpty(radioMessage)
+                        ? WifiRadioPolicy.DescribeUnavailable(radioState)
+                        : radioMessage;
+                    if (settings.AutoEnableWifi &&
+                        radioState == WifiRadioAvailability.SoftwareOff &&
+                        !wifiRadioEnableAttempted)
+                    {
+                        unavailable += " 可在托盘中开启“自动开启 Wi-Fi”后重试。";
+                    }
+                    if (!notifiedWifiRadioUnavailable)
+                    {
+                        notifiedWifiRadioUnavailable = true;
+                        Notify("Wi-Fi 无线电未开启", unavailable, ToolTipIcon.Warning);
+                    }
+                    SetState(GuardState.EnvironmentUnknown,
+                        unavailable + " 已暂停 Wi-Fi 回退，等待网络状态变化或用户开启 Wi-Fi。");
+                    return;
+                }
+            }
+
+            bool campusEvidence = IsRecentCampusContext() || WifiManager.IsSsidVisible(profile);
+            if (!campusEvidence)
+            {
+                SetState(GuardState.EnvironmentUnknown, "未检测到校园网特征，且未发现 " + profile + "，已暂停 Wi-Fi 回退。");
                 return;
             }
             if (!WifiManager.IsProfileSaved(profile))
@@ -824,7 +892,6 @@ namespace CampusNetGuard
                 return;
             }
 
-            RecordAttempt();
             SetState(GuardState.WifiFallback, "有线断开，正在连接 Wi-Fi " + profile + "...");
             if (!WifiManager.Connect(profile, wifi.Name))
             {
@@ -865,7 +932,7 @@ namespace CampusNetGuard
                 wifiFallbackActive = true;
                 ResetFailures();
                 manualActionBlocked = false;
-                SetState(GuardState.WifiFallback, "Wi-Fi " + profile + " 已连接并恢复上网。");
+                SetState(GuardState.Online, "Wi-Fi " + profile + " 已连接并恢复上网。");
                 return;
             }
 
@@ -885,11 +952,9 @@ namespace CampusNetGuard
                 return;
             }
 
-            RecordAttempt();
             SetState(GuardState.Authenticating, "正在认证 Wi-Fi 校园门户...");
             string[] candidates = BuildWifiCandidates(wifi.IPv4);
-            AuthResult result = PortalAuthenticator.Authenticate(candidates, wifi.IPv4,
-                settings.Username, password);
+            AuthResult result = AuthenticatePortal(candidates, wifi.IPv4);
             HandleAuthResult(result, wifi.IPv4, true);
         }
 
@@ -908,7 +973,7 @@ namespace CampusNetGuard
                     if (wifi)
                     {
                         wifiFallbackActive = true;
-                        SetState(GuardState.WifiFallback, "Wi-Fi 校园认证成功，网络已恢复。");
+                        SetState(GuardState.Online, "Wi-Fi 校园认证成功，网络已恢复。");
                     }
                     else
                     {
@@ -970,8 +1035,23 @@ namespace CampusNetGuard
             lastAuthMessage = message;
             ScheduleFailure(message);
             if (failureCount == 3)
-                Notify("校园网重连持续失败", message + " 程序会继续按退避策略尝试。", ToolTipIcon.Warning);
+                Notify("校园网重连持续失败", message + " 程序会继续每 30 秒尝试。", ToolTipIcon.Warning);
             SetState(GuardState.Waiting, NextAttemptDescription("认证失败，等待重试: " + message));
+        }
+
+        private AuthResult AuthenticatePortal(string[] candidates, IPAddress localAddress)
+        {
+            DateTime now = DateTime.UtcNow;
+            bool allowBrowserFallback = !nextBrowserFallbackUtc.HasValue ||
+                now >= nextBrowserFallbackUtc.Value;
+            AuthResult result = PortalAuthenticator.Authenticate(candidates, localAddress,
+                settings.Username, password, allowBrowserFallback);
+            if (result != null && result.BrowserFallbackAttempted)
+            {
+                nextBrowserFallbackUtc = now.AddSeconds(
+                    RetryPolicy.BrowserFallbackThrottleSeconds);
+            }
+            return result;
         }
 
         private string[] BuildWifiCandidates(IPAddress localAddress)
@@ -1020,33 +1100,17 @@ namespace CampusNetGuard
 
         private bool CanAttempt()
         {
-            PruneAttempts();
-            if (attemptHistory.Count >= 6)
-                return false;
             return !nextAttemptUtc.HasValue || DateTime.UtcNow >= nextAttemptUtc.Value;
-        }
-
-        private void RecordAttempt()
-        {
-            DateTime now = DateTime.UtcNow;
-            attemptHistory.Add(now);
-            PruneAttempts();
         }
 
         private void ScheduleFailure(string message)
         {
             DateTime now = DateTime.UtcNow;
-            PruneAttempts();
-            failureCount++;
-            int[] minutes = new int[] { 1, 5, 15, 30, 30, 30 };
-            int index = failureCount - 1;
-            if (index < 0) index = 0;
-            if (index >= minutes.Length) index = minutes.Length - 1;
-            if (attemptHistory.Count >= 6)
-                nextAttemptUtc = attemptHistory[0].AddHours(1);
-            else
-                nextAttemptUtc = now.AddMinutes(minutes[index]);
-            Logger.Warn("自动重连失败，第 " + failureCount + " 次，等待 " + minutes[index] + " 分钟: "
+            RetryDecision decision = RetryPolicy.PlanFailure(now, failureCount);
+            failureCount = decision.FailureCount;
+            nextAttemptUtc = decision.NextAttemptUtc;
+            Logger.Warn("自动重连失败，第 " + failureCount + " 次，等待 " +
+                decision.DelaySeconds + " 秒: "
                 + Logger.Sanitize(message, settings.Username));
         }
 
@@ -1054,22 +1118,13 @@ namespace CampusNetGuard
         {
             failureCount = 0;
             nextAttemptUtc = null;
-            attemptHistory.Clear();
-        }
-
-        private void PruneAttempts()
-        {
-            DateTime cutoff = DateTime.UtcNow.AddHours(-1);
-            while (attemptHistory.Count > 0 && attemptHistory[0] < cutoff)
-                attemptHistory.RemoveAt(0);
+            nextBrowserFallbackUtc = null;
         }
 
         private string NextAttemptDescription(string prefix)
         {
             if (nextAttemptUtc.HasValue)
                 return prefix + "，最早 " + nextAttemptUtc.Value.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "。";
-            if (attemptHistory.Count >= 6)
-                return prefix + "，已达到每小时 6 次上限，稍后再试。";
             return prefix + "。";
         }
 
@@ -1083,11 +1138,7 @@ namespace CampusNetGuard
             Post(delegate
             {
                 GuardState previousState = state;
-                bool recovering =
-                    (newState == GuardState.Online && previousState != GuardState.Online &&
-                        previousState != GuardState.Starting) ||
-                    (newState == GuardState.WifiFallback && previousState != GuardState.WifiFallback &&
-                        previousState != GuardState.Online && previousState != GuardState.Starting);
+                bool recovering = GuardStateTransitions.IsRecovery(previousState, newState);
                 state = newState;
                 statusDetail = detail ?? "";
                 UpdateTray();
@@ -1130,6 +1181,10 @@ namespace CampusNetGuard
             recoveryAutoItem.Checked = settings.GetReturnPolicy() == EthernetReturnPolicy.AutoAfter60Seconds;
             recoveryManualItem.Checked = settings.GetReturnPolicy() == EthernetReturnPolicy.KeepWifiManual;
             recoveryKeepItem.Checked = settings.GetReturnPolicy() == EthernetReturnPolicy.KeepWifiNoAuto;
+            wifiRadioItem.Checked = settings.AutoEnableWifi;
+            wifiRadioItem.Text = settings.AutoEnableWifi
+                ? "有线断开时尝试开启 Wi-Fi（已启用）"
+                : "有线断开时尝试开启 Wi-Fi（已禁用）";
             startupItem.Checked = StartupManager.IsEnabled();
             string text = "校园网助手 - " + StateLabel(state);
             if (text.Length > 63)
@@ -1177,11 +1232,15 @@ namespace CampusNetGuard
 
         private void OnNetworkChanged(object sender, EventArgs e)
         {
+            wifiRadioEnableAttempted = false;
+            notifiedWifiRadioUnavailable = false;
             QueueCheck();
         }
 
         private void OnNetworkAvailabilityChanged(object sender, NetworkAvailabilityEventArgs e)
         {
+            wifiRadioEnableAttempted = false;
+            notifiedWifiRadioUnavailable = false;
             QueueCheck();
         }
 
@@ -1228,7 +1287,7 @@ namespace CampusNetGuard
                 case GuardState.WifiFallback:
                     return "Wi-Fi 回退";
                 case GuardState.ScheduledPaused:
-                    return "计划暂停";
+                    return "学校计划断网暂停";
                 case GuardState.UserPaused:
                     return "手动暂停";
                 case GuardState.EnvironmentUnknown:

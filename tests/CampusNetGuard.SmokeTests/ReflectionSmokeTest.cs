@@ -37,6 +37,57 @@ internal static class ReflectionSmokeTest
         Assert(!(bool)Static("ScheduleRules", "IsPaused", new DateTime(2026, 9, 27, 6, 0, 0)), "周日 06:00:00 不暂停");
         Assert(!(bool)Static("ScheduleRules", "IsPaused", new DateTime(2026, 10, 2, 1, 0, 0)), "周五 01:00:00 不暂停");
         Assert(!(bool)Static("ScheduleRules", "IsPaused", new DateTime(2026, 10, 3, 1, 0, 0)), "周六 01:00:00 不暂停");
+        Type scheduleRules = campus.GetType("CampusNetGuard.ScheduleRules", true);
+        MethodInfo pauseDescription = scheduleRules.GetMethod("GetPauseDescription",
+            BindingFlags.Public | BindingFlags.Static);
+        Assert(pauseDescription != null, "计划暂停说明方法存在");
+        if (pauseDescription != null)
+        {
+            string description = Convert.ToString(pauseDescription.Invoke(null, null));
+            Assert(description.Contains("学校计划断网") && description.Contains("不会断开网络"),
+                "计划暂停说明明确不会主动断网");
+        }
+
+        Type retryPolicy = campus.GetType("CampusNetGuard.RetryPolicy", false);
+        Assert(retryPolicy != null, "普通失败重试策略类型存在");
+        MethodInfo planFailure = retryPolicy == null ? null :
+            retryPolicy.GetMethod("PlanFailure", BindingFlags.Public | BindingFlags.Static);
+        Assert(planFailure != null, "普通失败重试计划存在");
+        if (planFailure != null)
+        {
+            DateTime retryNow = new DateTime(2026, 10, 17, 12, 0, 0, DateTimeKind.Utc);
+            object retryDecision = planFailure.Invoke(null, new object[] { retryNow, 7 });
+            Type retryDecisionType = retryDecision.GetType();
+            DateTime nextAttempt = (DateTime)retryDecisionType.GetField("NextAttemptUtc").GetValue(retryDecision);
+            int retrySeconds = (int)retryDecisionType.GetField("DelaySeconds").GetValue(retryDecision);
+            int nextFailureCount = (int)retryDecisionType.GetField("FailureCount").GetValue(retryDecision);
+            Assert(retrySeconds == 30, "普通认证失败固定等待 30 秒");
+            Assert(nextAttempt == retryNow.AddSeconds(30), "下次重试时间严格为 30 秒后");
+            Assert(nextFailureCount == 8, "连续失败次数继续累计而不截断");
+        }
+        FieldInfo browserThrottle = retryPolicy == null ? null :
+            retryPolicy.GetField("BrowserFallbackThrottleSeconds", BindingFlags.Public | BindingFlags.Static);
+        Assert(browserThrottle != null && (int)browserThrottle.GetValue(null) == 120,
+            "浏览器回退最多每 2 分钟一次");
+
+        Type wifiRadioState = campus.GetType("CampusNetGuard.WifiRadioAvailability", false);
+        Assert(wifiRadioState != null && Enum.IsDefined(wifiRadioState, "SoftwareOff") &&
+            Enum.IsDefined(wifiRadioState, "HardwareOff"), "Wi-Fi 无线电状态区分软硬件关闭");
+        Type wifiRadioPolicy = campus.GetType("CampusNetGuard.WifiRadioPolicy", false);
+        MethodInfo shouldAttemptRadioEnable = wifiRadioPolicy == null ? null :
+            wifiRadioPolicy.GetMethod("ShouldAttemptEnable", BindingFlags.Public | BindingFlags.Static);
+        Assert(shouldAttemptRadioEnable != null, "Wi-Fi 自动开启策略存在");
+        if (shouldAttemptRadioEnable != null && wifiRadioState != null)
+        {
+            object softwareOff = Enum.Parse(wifiRadioState, "SoftwareOff");
+            object hardwareOff = Enum.Parse(wifiRadioState, "HardwareOff");
+            Assert((bool)shouldAttemptRadioEnable.Invoke(null, new object[] { true, softwareOff }),
+                "软件 Wi-Fi 开关关闭时允许自动开启");
+            Assert(!(bool)shouldAttemptRadioEnable.Invoke(null, new object[] { false, softwareOff }),
+                "关闭自动开启设置后不修改 Wi-Fi 开关");
+            Assert(!(bool)shouldAttemptRadioEnable.Invoke(null, new object[] { true, hardwareOff }),
+                "硬件 Wi-Fi 开关关闭时不盲目尝试");
+        }
 
         Assert((bool)Static("NetworkInspector", "IsCampusGateway", IPAddress.Parse("10.0.104.2")), "校园网关 10.0.104.2");
         Assert(!(bool)Static("NetworkInspector", "IsCampusGateway", IPAddress.Parse("192.168.1.1")), "非校园网关 192.168.1.1");
@@ -103,16 +154,46 @@ internal static class ReflectionSmokeTest
         FieldInfo manualActionBlocked = context.GetField("manualActionBlocked", flags);
         FieldInfo failureCount = context.GetField("failureCount", flags);
         FieldInfo nextAttemptUtc = context.GetField("nextAttemptUtc", flags);
-        FieldInfo attemptHistory = context.GetField("attemptHistory", flags);
         credentialBlocked.SetValue(uninitializedContext, true);
         manualActionBlocked.SetValue(uninitializedContext, true);
         failureCount.SetValue(uninitializedContext, 3);
         nextAttemptUtc.SetValue(uninitializedContext, (DateTime?)DateTime.UtcNow.AddMinutes(5));
-        attemptHistory.SetValue(uninitializedContext, new List<DateTime> { DateTime.UtcNow });
         context.GetMethod("ResetFailures", flags).Invoke(uninitializedContext, null);
         Assert((bool)credentialBlocked.GetValue(uninitializedContext), "重置普通失败不会解除凭据锁定");
         Assert((bool)manualActionBlocked.GetValue(uninitializedContext), "重置普通失败不会解除人工验证锁定");
         Assert((int)failureCount.GetValue(uninitializedContext) == 0, "重置普通失败会清空退避计数");
+
+        object retryContext = FormatterServices.GetUninitializedObject(context);
+        nextAttemptUtc.SetValue(retryContext, null);
+        failureCount.SetValue(retryContext, 100);
+        MethodInfo canAttempt = context.GetMethod("CanAttempt", flags);
+        Assert((bool)canAttempt.Invoke(retryContext, null), "普通失败不再受每小时 6 次限制");
+
+        Type guardTransitions = campus.GetType("CampusNetGuard.GuardStateTransitions", false);
+        MethodInfo isRecovery = guardTransitions == null ? null :
+            guardTransitions.GetMethod("IsRecovery", BindingFlags.Public | BindingFlags.Static);
+        Assert(isRecovery != null, "网络恢复状态判定存在");
+        Type guardStateType = campus.GetType("CampusNetGuard.GuardState", true);
+        if (isRecovery != null)
+        {
+            object waiting = Enum.Parse(guardStateType, "Waiting");
+            object wifiFallback = Enum.Parse(guardStateType, "WifiFallback");
+            object online = Enum.Parse(guardStateType, "Online");
+            Assert(!(bool)isRecovery.Invoke(null, new object[] { waiting, wifiFallback }),
+                "进入 Wi-Fi 回退不算网络已恢复");
+            Assert((bool)isRecovery.Invoke(null, new object[] { wifiFallback, online }),
+                "Wi-Fi 回退成功后算网络已恢复");
+        }
+
+        Type appSettings = campus.GetType("CampusNetGuard.AppSettings", true);
+        object defaultSettings = Activator.CreateInstance(appSettings);
+        FieldInfo autoEnableWifi = appSettings.GetField("AutoEnableWifi",
+            BindingFlags.Public | BindingFlags.Instance);
+        Assert(autoEnableWifi != null && (bool)autoEnableWifi.GetValue(defaultSettings),
+            "默认允许有线断开后尝试开启 Wi-Fi");
+        Type wifiManager = campus.GetType("CampusNetGuard.WifiManager", true);
+        Assert(wifiManager.GetMethod("TryEnableSoftwareRadio", BindingFlags.Public | BindingFlags.Static) != null,
+            "Wi-Fi 软件无线电开启接口存在");
 
         string testLogDirectory = Path.Combine(Path.GetTempPath(),
             "CampusNetGuard-log-test-" + Guid.NewGuid().ToString("N"));
