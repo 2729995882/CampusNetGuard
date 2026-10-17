@@ -6,8 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$app = Join-Path $root "artifacts\bin\$Configuration\CampusNetGuard.exe"
-$tests = Join-Path $root "artifacts\tests\$Configuration\CampusNetGuard.SmokeTests.exe"
+$app = Join-Path $root "artifacts\bin\CampusNetGuard\$Configuration\net48\CampusNetGuard.exe"
+$tests = Join-Path $root "artifacts\bin\CampusNetGuard.SmokeTests\$Configuration\net48\CampusNetGuard.SmokeTests.exe"
 
 if (-not (Test-Path -LiteralPath $app) -or -not (Test-Path -LiteralPath $tests)) {
     & (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration

@@ -19,7 +19,7 @@ if (Test-Path -LiteralPath $stage) {
 }
 New-Item -ItemType Directory -Force -Path $stage, $releaseRoot | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $root "artifacts\bin\$Configuration\CampusNetGuard.exe") -Destination $stage
+Copy-Item -LiteralPath (Join-Path $root "artifacts\bin\CampusNetGuard\$Configuration\net48\CampusNetGuard.exe") -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root "README.md"), (Join-Path $root "CHANGELOG.md") -Destination $stage
 New-Item -ItemType Directory -Force -Path (Join-Path $stage "docs") | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "docs\使用说明.md"), (Join-Path $root "docs\CampusNetGuard开发设计与实现说明.docx") -Destination (Join-Path $stage "docs")

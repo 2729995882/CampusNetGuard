@@ -17,7 +17,7 @@ docs: update portal troubleshooting notes
 
 ## 变更检查
 
-1. 运行 `scripts\build.ps1 -Configuration Release`。
+1. 运行 `scripts\build.ps1 -Configuration Release`，它会执行标准 `dotnet restore` 和 `dotnet build`。
 2. 运行 `scripts\test.ps1 -Configuration Release`。
 3. 如果修改了门户解析，增加脱敏 HTML 样本和离线测试。
 4. 如果修改了网络或 Wi-Fi 行为，在用户在场时人工验证。

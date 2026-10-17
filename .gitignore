@@ -2,6 +2,7 @@
 bin/
 obj/
 artifacts/
+.dotnet/
 *.user
 *.suo
 *.userprefs
