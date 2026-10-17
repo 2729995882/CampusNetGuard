@@ -1,0 +1,39 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        shell: powershell
+        run: .\scripts\build.ps1 -Configuration Release
+
+      - name: Test
+        shell: powershell
+        run: .\scripts\test.ps1 -Configuration Release
+
+      - name: Upload application artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CampusNetGuard-${{ github.sha }}
+          path: artifacts/bin/Release/CampusNetGuard.exe
+          if-no-files-found: error

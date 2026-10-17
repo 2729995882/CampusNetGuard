@@ -1,0 +1,44 @@
+# Build output
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+*.userprefs
+
+# Runtime data and diagnostics
+settings.xml
+app-*.log
+*.log
+*.cookie
+*.cookies
+portal-cookies.txt
+chrome-profile-*/
+chrome-dom*.txt
+chrome-err*.txt
+curl-headers.txt
+head-service-*.txt
+common-js-*.txt
+
+# Credentials and local configuration
+.env
+.env.*
+secrets/
+*.pfx
+*.p12
+*.key
+
+# Documentation and Office lock files
+~$*
+.~lock.*
+
+# OS and editor state
+.DS_Store
+Thumbs.db
+desktop.ini
+.vs/
+.vscode/
+
+# Python tool cache
+__pycache__/
+*.py[cod]

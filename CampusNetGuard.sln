@@ -1,0 +1,31 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CampusNetGuard", "src\CampusNetGuard\CampusNetGuard.csproj", "{4C5DF5EE-6A92-4B27-B7B5-2A5F6C8D54A1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CampusNetGuard.SmokeTests", "tests\CampusNetGuard.SmokeTests\CampusNetGuard.SmokeTests.csproj", "{0F51C1B9-8875-429A-9F86-B7C1C4C4D698}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4C5DF5EE-6A92-4B27-B7B5-2A5F6C8D54A1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4C5DF5EE-6A92-4B27-B7B5-2A5F6C8D54A1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4C5DF5EE-6A92-4B27-B7B5-2A5F6C8D54A1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4C5DF5EE-6A92-4B27-B7B5-2A5F6C8D54A1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0F51C1B9-8875-429A-9F86-B7C1C4C4D698}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0F51C1B9-8875-429A-9F86-B7C1C4C4D698}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0F51C1B9-8875-429A-9F86-B7C1C4C4D698}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0F51C1B9-8875-429A-9F86-B7C1C4C4D698}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {AC62C970-AF1C-45F1-AA91-27C1175B3770}
+	EndGlobalSection
+EndGlobal

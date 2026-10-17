@@ -1,0 +1,45 @@
+name: 缺陷报告
+description: 记录可复现的运行、门户或网络问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: 请先移除账号、密码、Cookie、完整认证数据和本机敏感路径后再提交。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么，期望发生什么？
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: 网络类型
+      options:
+        - 有线
+        - Wi-Fi
+        - 有线断开后的 Wi-Fi 回退
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 不要粘贴密码、Cookie、完整认证提交内容或含个人信息的完整配置。
