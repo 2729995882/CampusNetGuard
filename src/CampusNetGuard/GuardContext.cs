@@ -1048,7 +1048,7 @@ namespace CampusNetGuard
                 settings.Username, password, allowBrowserFallback);
             if (result != null && result.BrowserFallbackAttempted)
             {
-                nextBrowserFallbackUtc = now.AddSeconds(
+                nextBrowserFallbackUtc = DateTime.UtcNow.AddSeconds(
                     RetryPolicy.BrowserFallbackThrottleSeconds);
             }
             return result;

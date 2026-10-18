@@ -60,7 +60,7 @@ namespace CampusNetGuard
     public static class RetryPolicy
     {
         public const int NormalRetryDelaySeconds = 30;
-        public const int BrowserFallbackThrottleSeconds = 120;
+        public const int BrowserFallbackThrottleSeconds = 30;
 
         public static RetryDecision PlanFailure(DateTime nowUtc, int currentFailureCount)
         {
