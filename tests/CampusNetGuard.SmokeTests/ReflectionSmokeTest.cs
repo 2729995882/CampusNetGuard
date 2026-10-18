@@ -5,6 +5,7 @@ using System.Net;
 using System.Reflection;
 using System.Collections.Generic;
 using System.Runtime.Serialization;
+using System.Text;
 
 internal static class ReflectionSmokeTest
 {
@@ -67,8 +68,8 @@ internal static class ReflectionSmokeTest
         }
         FieldInfo browserThrottle = retryPolicy == null ? null :
             retryPolicy.GetField("BrowserFallbackThrottleSeconds", BindingFlags.Public | BindingFlags.Static);
-        Assert(browserThrottle != null && (int)browserThrottle.GetValue(null) == 120,
-            "浏览器回退最多每 2 分钟一次");
+        Assert(browserThrottle != null && (int)browserThrottle.GetValue(null) == 30,
+            "浏览器回退最多每 30 秒一次");
 
         Type wifiRadioState = campus.GetType("CampusNetGuard.WifiRadioAvailability", false);
         Assert(wifiRadioState != null && Enum.IsDefined(wifiRadioState, "SoftwareOff") &&
@@ -117,11 +118,17 @@ internal static class ReflectionSmokeTest
         Assert(context.GetMethod("ProcessConnectedWifi", flags) != null, "Wi-Fi 门户处理逻辑存在");
         Type program = campus.GetType("CampusNetGuard.Program", true);
         Assert(program.GetField("singleInstanceMutex", BindingFlags.NonPublic | BindingFlags.Static) != null, "单实例保护存在");
+        Assert(program.GetMethod("InstallExceptionHandlers", flags) != null, "未处理异常诊断已接入");
+        Assert(program.GetMethod("LogApplicationExit", flags) != null, "正常退出日志已接入");
 
         Type portal = campus.GetType("CampusNetGuard.PortalAuthenticator", true);
+        Type authOutcome = campus.GetType("CampusNetGuard.AuthOutcome", true);
         MethodInfo challengeCheck = portal.GetMethod("HasManualChallenge", flags);
         MethodInfo credentialCheck = portal.GetMethod("LooksLikeCredentialError", flags);
         MethodInfo payloadDecode = portal.GetMethod("TryDecodePayload", flags);
+        MethodInfo parseAuthResponse = portal.GetMethod("ParseAuthResponse", flags);
+        MethodInfo responseFallbackCheck = portal.GetMethod("ShouldTryBrowserFallback",
+            BindingFlags.Public | BindingFlags.Static);
         Type formParser = campus.GetType("CampusNetGuard.HtmlFormParser", true);
         MethodInfo parseForm = formParser.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static);
         string visibleChallengeHtml = "<form id='form1'><input type='text' name='verifyCode'></form>";
@@ -142,12 +149,70 @@ internal static class ReflectionSmokeTest
         Assert((bool)credentialCheck.Invoke(null, new object[] { "63032", "" }), "门户 63032 按凭据错误处理");
         object[] decodeArgs = new object[] { "%7B%22errorNumber%22%3A%2263032%22%7D", null };
         Assert((bool)payloadDecode.Invoke(null, decodeArgs) && ((string)decodeArgs[1]).Contains("63032"), "门户响应 URL 解码");
+        string urlEncodedSuccessJson = "%7B%22errorNumber%22%3A%221%22%2C%22portalLink%22%3A%22portal-1%22%7D";
+        string base64UrlEncodedSuccess = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(urlEncodedSuccessJson));
+        object[] base64DecodeArgs = new object[] { base64UrlEncodedSuccess, null };
+        Assert((bool)payloadDecode.Invoke(null, base64DecodeArgs) &&
+            ((string)base64DecodeArgs[1]).Contains("\"errorNumber\":\"1\"") &&
+            !((string)base64DecodeArgs[1]).Contains("%22"),
+            "门户响应先 Base64 后 URL 解码");
+        Assert(parseAuthResponse != null, "门户认证响应解析方法存在");
+        if (parseAuthResponse != null)
+        {
+            object decodedSuccess = parseAuthResponse.Invoke(null,
+                new object[] { base64UrlEncodedSuccess });
+            Assert(decodedSuccess != null &&
+                decodedSuccess.GetType().GetField("Outcome").GetValue(decodedSuccess)
+                    .ToString() == "Success", "Base64 门户成功响应可识别");
+            string urlEncodedCredentialFailure = "%7B%22errorNumber%22%3A%220%22%2C" +
+                "%22e_c%22%3A%2263032%22%2C%22e_d%22%3A%22credentialError%22%2C" +
+                "%22credentialError%22%3A%22%E5%AF%86%E7%A0%81%E9%94%99%E8%AF%AF%22%7D";
+            string base64CredentialFailure = Convert.ToBase64String(
+                Encoding.UTF8.GetBytes(urlEncodedCredentialFailure));
+            object decodedCredentialFailure = parseAuthResponse.Invoke(null,
+                new object[] { base64CredentialFailure });
+            Assert(decodedCredentialFailure != null &&
+                decodedCredentialFailure.GetType().GetField("Outcome").GetValue(decodedCredentialFailure)
+                    .ToString() == "RejectedCredentials", "Base64 门户凭据错误响应可识别");
+        }
+
+        Type authResultType = campus.GetType("CampusNetGuard.AuthResult", true);
+        MethodInfo authFailure = authResultType.GetMethod("Failure",
+            BindingFlags.Public | BindingFlags.Static);
+        Assert(responseFallbackCheck != null, "门户响应异常回退判定存在");
+        if (responseFallbackCheck != null && authFailure != null)
+        {
+            object parseFailureResult = authFailure.Invoke(null, new object[]
+            {
+                Enum.Parse(authOutcome, "TransientFailure"), "门户响应缺少认证结果。", "PORTAL_RESPONSE"
+            });
+            object credentialFailureResult = authFailure.Invoke(null, new object[]
+            {
+                Enum.Parse(authOutcome, "RejectedCredentials"), "账号或密码错误。", "63032"
+            });
+            Assert((bool)responseFallbackCheck.Invoke(null, new object[] { parseFailureResult }),
+                "解析异常时允许浏览器回退");
+            Assert(!(bool)responseFallbackCheck.Invoke(null, new object[] { credentialFailureResult }),
+                "凭据错误时不触发浏览器回退");
+        }
 
         Type guardState = campus.GetType("CampusNetGuard.GuardState", true);
-        Type authOutcome = campus.GetType("CampusNetGuard.AuthOutcome", true);
         Assert(Enum.IsDefined(guardState, "ManualActionRequired"), "人工处理状态存在");
         Assert(Enum.IsDefined(authOutcome, "ManualActionRequired"), "人工验证认证结果存在");
         Assert(context.GetField("manualActionBlocked", flags) != null, "人工验证锁定字段存在");
+
+        Type browserSessionType = campus.GetType("CampusNetGuard.PortalBrowserSession", true);
+        MethodInfo browserReadyCheck = browserSessionType.GetMethod(
+            "IsPortalReadyState", BindingFlags.Public | BindingFlags.Static);
+        Assert(browserReadyCheck != null, "浏览器门户就绪判定存在");
+        if (browserReadyCheck != null)
+        {
+            Assert((bool)browserReadyCheck.Invoke(null, new object[] { "complete|True|True|True" }),
+                "浏览器页面完整加载后允许认证");
+            Assert(!(bool)browserReadyCheck.Invoke(null, new object[] { "complete|True|False|True" }),
+                "账号字段未出现时不提前认证");
+        }
 
         object uninitializedContext = FormatterServices.GetUninitializedObject(context);
         FieldInfo credentialBlocked = context.GetField("credentialBlocked", flags);

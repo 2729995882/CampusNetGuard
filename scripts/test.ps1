@@ -9,8 +9,9 @@ $root = Split-Path -Parent $PSScriptRoot
 $app = Join-Path $root "artifacts\bin\CampusNetGuard\$Configuration\net48\CampusNetGuard.exe"
 $tests = Join-Path $root "artifacts\bin\CampusNetGuard.SmokeTests\$Configuration\net48\CampusNetGuard.SmokeTests.exe"
 
-if (-not (Test-Path -LiteralPath $app) -or -not (Test-Path -LiteralPath $tests)) {
-    & (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration
+& (Join-Path $PSScriptRoot "build.ps1") -Configuration $Configuration
+if ($LASTEXITCODE -ne 0) {
+    throw "Build failed with exit code $LASTEXITCODE."
 }
 
 & $tests $app

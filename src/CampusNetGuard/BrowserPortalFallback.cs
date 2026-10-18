@@ -13,7 +13,7 @@ namespace CampusNetGuard
     public sealed class PortalBrowserSession : IDisposable
     {
         private const int DefaultTimeoutMs = 30000;
-        private const int PageReadyTimeoutMs = 20000;
+        private const int PageReadyTimeoutMs = 30000;
         private const string NativeResultPrefix = "__CNG_NATIVE_OK__";
 
         private Process browserProcess;
@@ -332,21 +332,35 @@ namespace CampusNetGuard
             const string readinessScript =
                 "(function(){var s=document.readyState||'';return s+'|'+" +
                 "(!!document.getElementById('form1'))+'|'+" +
-                "(typeof f_preLoginForInputPanel==='function')+'|'+" +
-                "(typeof $==='function');})()";
+                "(!!(document.getElementById('id_userName')||document.querySelector('[name=\"userName\"]')))+'|'+" +
+                "(!!(document.getElementById('id_userPwd')||document.querySelector('[name=\"userPwd\"]')));})()";
             while (DateTime.UtcNow < deadline)
             {
                 string state;
                 if (cdp.EvaluateString(readinessScript, false, out state, out lastError))
                 {
-                    if ((state.StartsWith("complete|True|True|True", StringComparison.OrdinalIgnoreCase) ||
-                         state.StartsWith("interactive|True|True|True", StringComparison.OrdinalIgnoreCase)))
+                    if (IsPortalReadyState(state))
                         return true;
                 }
                 Thread.Sleep(200);
             }
             error = string.IsNullOrEmpty(lastError) ? "等待门户页面加载超时。" : lastError;
             return false;
+        }
+
+        public static bool IsPortalReadyState(string state)
+        {
+            if (string.IsNullOrEmpty(state))
+                return false;
+            string[] parts = state.Split('|');
+            if (parts.Length < 4)
+                return false;
+            bool documentReady = string.Equals(parts[0], "complete", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(parts[0], "interactive", StringComparison.OrdinalIgnoreCase);
+            return documentReady &&
+                string.Equals(parts[1], "True", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[2], "True", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[3], "True", StringComparison.OrdinalIgnoreCase);
         }
 
         private void TryDeleteProfile()

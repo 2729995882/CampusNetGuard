@@ -96,6 +96,8 @@ namespace CampusNetGuard
                 return AuthResult.Failure(AuthOutcome.RejectedCredentials, "尚未配置校园网账号或密码。", "CONFIG");
 
             string lastError = "";
+            string lastErrorCode = "PORTAL_FORM";
+            string browserEntryUrl = "";
             if (candidates != null)
             {
                 for (int i = 0; i < candidates.Length; i++)
@@ -103,33 +105,44 @@ namespace CampusNetGuard
                     string candidate = candidates[i];
                     if (string.IsNullOrEmpty(candidate))
                         continue;
-                    AuthResult result = AuthenticateCandidate(candidate, bindAddress, username, password,
-                        allowBrowserFallback);
-                    if (result.Outcome != AuthOutcome.FormParseFailure)
+                    AuthResult result = AuthenticateCandidate(candidate, bindAddress, username, password);
+                    if (!ShouldTryBrowserFallback(result))
                         return result;
                     lastError = result.Message;
+                    lastErrorCode = result.ErrorCode;
+                    if (string.IsNullOrEmpty(browserEntryUrl))
+                        browserEntryUrl = candidate;
                 }
             }
 
             if (string.IsNullOrEmpty(lastError))
                 lastError = "找不到可解析的校园门户登录页面。";
-            return AuthResult.Failure(AuthOutcome.FormParseFailure, lastError, "PORTAL_FORM");
+            if (!string.IsNullOrEmpty(browserEntryUrl))
+            {
+                if (!allowBrowserFallback)
+                    return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                        "直连门户失败（" + lastError + "），浏览器回退仍在冷却中。",
+                        "PORTAL_BROWSER_THROTTLED");
+                return AuthenticateWithBrowser(browserEntryUrl, username, password, lastError);
+            }
+            return AuthResult.Failure(AuthOutcome.FormParseFailure, lastError,
+                string.IsNullOrEmpty(lastErrorCode) ? "PORTAL_FORM" : lastErrorCode);
         }
 
         private static AuthResult AuthenticateCandidate(string entryUrl, IPAddress bindAddress,
-            string username, string password, bool allowBrowserFallback)
+            string username, string password)
         {
             CookieContainer cookies = new CookieContainer();
             HttpResult page = HttpHelper.Get(entryUrl, bindAddress, cookies, true);
             if (page == null || string.IsNullOrEmpty(page.Content) ||
                 page.Content.IndexOf("<input", StringComparison.OrdinalIgnoreCase) < 0)
-                return BrowserFallbackOrFailure(entryUrl, username, password, allowBrowserFallback,
-                    "门户页面为空或未返回登录表单。");
+                return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                    "门户页面为空或未返回登录表单。", "PORTAL_FORM");
 
             List<FormField> fields = HtmlFormParser.Parse(page.Content);
             if (fields.Count == 0)
-                return BrowserFallbackOrFailure(entryUrl, username, password, allowBrowserFallback,
-                    "门户登录表单中没有可提交字段。");
+                return AuthResult.Failure(AuthOutcome.FormParseFailure,
+                    "门户登录表单中没有可提交字段。", "PORTAL_FORM");
 
             if (HasManualChallenge(page.Content, fields))
                 return AuthResult.Failure(AuthOutcome.ManualActionRequired,
@@ -152,20 +165,20 @@ namespace CampusNetGuard
             string formBody = BuildFormBody(fields);
             HttpResult response = HttpHelper.PostForm(postUrl, formBody, page.FinalUrl, bindAddress, cookies);
             if (response == null || string.IsNullOrEmpty(response.Content))
-                return BrowserFallbackOrFailure(entryUrl, username, password, allowBrowserFallback,
-                    "门户登录请求没有返回内容。");
+                return AuthResult.Failure(AuthOutcome.TransientFailure,
+                    "门户登录请求没有返回内容。", "PORTAL_RESPONSE");
 
             return ParseAuthResponse(response.Content);
         }
 
-        private static AuthResult BrowserFallbackOrFailure(string entryUrl, string username,
-            string password, bool allowBrowserFallback, string directFailure)
+        public static bool ShouldTryBrowserFallback(AuthResult result)
         {
-            if (!allowBrowserFallback)
-                return AuthResult.Failure(AuthOutcome.FormParseFailure,
-                    "直连门户失败（" + directFailure + "），浏览器回退仍在冷却中。",
-                    "PORTAL_BROWSER_THROTTLED");
-            return AuthenticateWithBrowser(entryUrl, username, password, directFailure);
+            if (result == null)
+                return true;
+            if (result.Outcome == AuthOutcome.FormParseFailure)
+                return true;
+            return result.Outcome == AuthOutcome.TransientFailure &&
+                string.Equals(result.ErrorCode, "PORTAL_RESPONSE", StringComparison.OrdinalIgnoreCase);
         }
 
         private static AuthResult AuthenticateWithBrowser(string entryUrl, string username,
@@ -361,37 +374,91 @@ namespace CampusNetGuard
         private static bool TryDecodePayload(string raw, out string json)
         {
             json = "";
-            if (string.IsNullOrEmpty(raw))
+            if (string.IsNullOrWhiteSpace(raw))
                 return false;
 
-            string candidate = raw.Trim();
-            if (candidate.IndexOf("errorNumber", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                json = candidate;
-                return true;
-            }
-
+            string original = raw.Trim().Trim('"');
+            List<string> candidates = new List<string>();
+            AddUnique(candidates, original);
             try
             {
-                string urlDecoded = HttpUtility.UrlDecode(candidate);
-                if (urlDecoded.IndexOf("errorNumber", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    json = urlDecoded;
-                    return true;
-                }
-                string base64 = urlDecoded.Replace(" ", "+").Trim();
-                byte[] bytes = Convert.FromBase64String(base64);
-                string decoded = Encoding.UTF8.GetString(bytes);
-                if (decoded.IndexOf("errorNumber", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    json = decoded;
-                    return true;
-                }
+                string formDecoded = HttpUtility.UrlDecode(original);
+                AddUnique(candidates, formDecoded);
+                AddUnique(candidates, formDecoded.Replace(" ", "+"));
+                AddUnique(candidates, Uri.UnescapeDataString(original));
             }
             catch
             {
             }
+
+            foreach (string candidate in candidates)
+            {
+                if (LooksLikePortalPayload(candidate))
+                {
+                    json = candidate;
+                    return true;
+                }
+
+                string decoded;
+                if (!TryDecodeBase64(candidate, out decoded))
+                    continue;
+                if (LooksLikePortalPayload(decoded))
+                {
+                    json = decoded;
+                    return true;
+                }
+                try
+                {
+                    string urlDecoded = Uri.UnescapeDataString(decoded);
+                    if (LooksLikePortalPayload(urlDecoded))
+                    {
+                        json = urlDecoded;
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+            }
             return false;
+        }
+
+        private static bool TryDecodeBase64(string value, out string decoded)
+        {
+            decoded = "";
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            string compact = Regex.Replace(value.Trim().Trim('"'), @"\s+", "");
+            compact = compact.Replace('-', '+').Replace('_', '/');
+            int remainder = compact.Length % 4;
+            if (remainder == 1)
+                return false;
+            if (remainder > 0)
+                compact += new string('=', 4 - remainder);
+            try
+            {
+                decoded = Encoding.UTF8.GetString(Convert.FromBase64String(compact));
+                return !string.IsNullOrEmpty(decoded);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool LooksLikePortalPayload(string value)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                Regex.IsMatch(value, @"""errorNumber""\s*:", RegexOptions.IgnoreCase);
+        }
+
+        private static void AddUnique(List<string> values, string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return;
+            if (!values.Contains(value))
+                values.Add(value);
         }
 
         private static string FindErrorCode(string json)
